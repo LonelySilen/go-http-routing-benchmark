@@ -11,11 +11,9 @@ import (
 	"net/http"
 	"os"
 	"regexp"
-	"runtime"
 
 	"github.com/ant0ine/go-json-rest/rest"
 	"github.com/astaxie/beego"
-	"github.com/astaxie/beego/context"
 	"github.com/bmizerany/pat"
 	"github.com/dimfeld/httptreemux"
 	"github.com/go-martini/martini"
@@ -54,69 +52,71 @@ func (m *mockResponseWriter) WriteHeader(int) {}
 var nullLogger *log.Logger
 
 func init() {
-	// beego sets it to runtime.NumCPU()
-	// Currently none of the contestors does concurrent routing
-	runtime.GOMAXPROCS(1)
 
 	// makes logging 'webscale' (ignores them)
 	log.SetOutput(new(mockResponseWriter))
 	nullLogger = log.New(new(mockResponseWriter), "", 0)
 
-	beego.RunMode = "prod"
 	martini.Env = martini.Prod
 	traffic.SetVar("env", "bench")
+	beego.RunMode = "prod"
 }
 
 // Common
 func httpHandlerFunc(w http.ResponseWriter, r *http.Request) {}
 
-// beego
-func beegoHandler(ctx *context.Context) {}
+type beegoRouter struct {
+	routers map[string]*beego.Tree
+}
 
-func beegoHandlerWrite(ctx *context.Context) {
-	ctx.WriteString(ctx.Input.Param(":name"))
+func (br *beegoRouter) Handle(method, pattern string, handler http.HandlerFunc) {
+	if t, ok := br.routers[method]; ok {
+		t.AddRouter(pattern, handler)
+	} else {
+		t := beego.NewTree()
+		t.AddRouter(pattern, handler)
+		br.routers[method] = t
+	}
+}
+
+func (br *beegoRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if t, ok := br.routers[r.Method]; ok {
+		runObject, params := t.Match(r.URL.Path)
+		if f, ok := runObject.(http.HandlerFunc); ok {
+			r.ParseForm()
+			for k, v := range params {
+				r.Form.Add(k, v)
+			}
+			f(w, r)
+		} else {
+			panic("wrong http func")
+		}
+	}
+}
+
+// beego router
+func beegoHandler(w http.ResponseWriter, r *http.Request) {}
+
+func beegoHandlerWrite(w http.ResponseWriter, r *http.Request) {
+	io.WriteString(w, r.FormValue(":name"))
 }
 
 func loadBeego(routes []route) http.Handler {
-	re := regexp.MustCompile(":([^/]*)")
-	app := beego.NewControllerRegister()
-	for _, route := range routes {
-		route.path = re.ReplaceAllString(route.path, ":$1")
-		switch route.method {
-		case "GET":
-			app.Get(route.path, beegoHandler)
-		case "POST":
-			app.Post(route.path, beegoHandler)
-		case "PUT":
-			app.Put(route.path, beegoHandler)
-		case "PATCH":
-			app.Patch(route.path, beegoHandler)
-		case "DELETE":
-			app.Delete(route.path, beegoHandler)
-		default:
-			panic("Unknow HTTP method: " + route.method)
-		}
+	router := &beegoRouter{
+		routers: make(map[string]*beego.Tree),
 	}
-	return app
+	for _, route := range routes {
+		router.Handle(route.method, route.path, beegoHandler)
+	}
+	return router
 }
 
-func loadBeegoSingle(method, path string, handler beego.FilterFunc) http.Handler {
-	app := beego.NewControllerRegister()
-	switch method {
-	case "GET":
-		app.Get(path, handler)
-	case "POST":
-		app.Post(path, handler)
-	case "PUT":
-		app.Put(path, handler)
-	case "PATCH":
-		app.Patch(path, handler)
-	case "DELETE":
-		app.Delete(path, handler)
-	default:
-		panic("Unknow HTTP method: " + method)
+func loadBeegoSingle(method, path string, handle http.HandlerFunc) http.Handler {
+	router := &beegoRouter{
+		routers: make(map[string]*beego.Tree),
 	}
-	return app
+	router.Handle(method, path, handle)
+	return router
 }
 
 // Denco
